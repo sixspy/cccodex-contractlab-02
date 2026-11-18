@@ -52,9 +52,9 @@ createApp({
     const token=ref(localStorage.getItem('contractlab_token')||'');
     const user=ref(localStorage.getItem('contractlab_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
-    const contracts=ref([]), batches=ref([]), buffers=ref([]), recon=ref({});
+    const contracts=ref([]), batches=ref([]), buffers=ref([]), rejections=ref([]), policy=ref({}), recon=ref({});
     const form=ref({subject:'订单入站', payload_fields:'order_id,amount'});
-    const nav=['契约版本','入站校验','双写缓冲','契约对账'];
+    const nav=['缺字段说明册','入站校验','缓冲队列','拒收详情','契约对账'];
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
       err.value='';
@@ -79,22 +79,26 @@ createApp({
       batches.value=Array.isArray(b.items)?b.items:[];
       const u=await loadJson('/api/buffers'); if(u===null) return;
       buffers.value=Array.isArray(u.items)?u.items:[];
+      const rj=await loadJson('/api/rejections'); if(rj===null) return;
+      rejections.value=Array.isArray(rj.items)?rj.items:[];
+      const p=await loadJson('/api/missing/policy'); if(p===null) return;
+      policy.value=p&&typeof p==='object'?p:{};
       const q=await loadJson('/api/reconcile'); if(q===null) return;
       recon.value=q&&typeof q==='object'?q:{};
     }
     async function validate(){
       actionErr.value='';
       const r=await fetch('/api/ingress/validate',{method:'POST',headers:auth(),body:JSON.stringify(form.value)});
-      const j=await r.json(); actionErr.value=r.ok?('校验结果：'+j.result+(j.missing?('；缺 '+j.missing.join(',')):'')):(j.detail||'失败');
+      const j=await r.json(); actionErr.value=r.ok?('校验结果：'+j.result+(j.missing?('；缺 '+j.missing.join(',')):'')+(j.detail?('；'+j.detail):'')):(j.detail||'失败');
       await refresh();
     }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,contracts,batches,buffers,recon,form,actionErr,login,logout,validate};
+    return {token,user,username,password,err,tab,nav,contracts,batches,buffers,rejections,policy,recon,form,actionErr,login,logout,validate};
   },
   template:`
   <div v-if="!token" class="login">
     <h1>入站契约</h1>
-    <p class="lede">按启用正式契约校验入站字段；缺字段按严格模式拒收或兼容模式进缓冲。</p>
+    <p class="lede">按启用正式契约校验；缺字段一律进缓冲队列并挂批次号，待补采，不标通过也不进拒收。</p>
     <label>用户名</label><input v-model="username"/><label>密码</label><input type="password" v-model="password"/>
     <div class="err">{{err}}</div><button class="primary" @click="login">打开契约簿</button>
   </div>
@@ -108,7 +112,15 @@ createApp({
     </header>
     <div class="steps"><button v-for="(n,i) in nav" :key="n" :class="{on:tab===i}" @click="tab=i">{{i+1}}. {{n}}</button></div>
     <div class="card" v-show="tab===0">
-      <h2>现行契约</h2>
+      <h2>缺字段说明册 <span class="stamp">乙 · {{policy.chosen_at}} 定案</span></h2>
+      <p class="meta" v-if="policy.locked">定案当天禁止改口；偏离即拦下并记「缺字段偏了」。</p>
+      <table><thead><tr><th>口径</th><th>内容</th></tr></thead><tbody>
+        <tr><td>落库写法</td><td>{{policy.rule}}</td></tr>
+        <tr><td>页序（乙）</td><td>{{policy.queue_order}}</td></tr>
+        <tr><td>缺字段计数</td><td>共 {{recon.missing && recon.missing.total}} · 缓冲 {{recon.missing && recon.missing.buffered}} · 拒收 {{recon.missing && recon.missing.rejected}} · 通过 {{recon.missing && recon.missing.passed}} · 无缓冲挂接 {{recon.missing && recon.missing.without_buffer}}</td></tr>
+        <tr><td>失败闭</td><td>无批缓冲孤儿 {{recon.orphan_buffers}} · 挂通过批次 {{recon.buffer_on_passed_batch}} · 缓冲标通过 {{recon.buffer_passed_status}} · 争用 {{recon.contention}} · 偏了 {{recon.deviations}} · 对齐 {{recon.aligned}}</td></tr>
+      </tbody></table>
+      <h2 style="margin-top:14px">现行契约</h2>
       <table><thead><tr><th>版本</th><th>主题</th><th>模式 / 轨</th><th>状态</th><th>必填字段</th></tr></thead>
       <tbody><tr v-for="c in contracts" :key="c.id">
         <td>{{c.version}}</td><td>{{c.subject}}</td><td>{{c.mode}} / {{c.track}}</td><td>{{c.status}}</td><td>{{c.required_fields}}</td>
@@ -123,23 +135,39 @@ createApp({
         <div class="err">{{actionErr}}</div>
       </div>
       <div class="card">
-        <h2>最近批次</h2>
-        <table><thead><tr><th>批次</th><th>结果</th><th>说明</th></tr></thead>
+        <h2>入站列表</h2>
+        <p class="meta">缺字段 {{recon.missing && recon.missing.total}} · 其中缓冲 {{recon.missing && recon.missing.buffered}} · 拒收 {{recon.missing && recon.missing.rejected}} · 通过 {{recon.missing && recon.missing.passed}}</p>
+        <table><thead><tr><th>批次</th><th>结果</th><th>缺字段</th><th>说明</th></tr></thead>
         <tbody><tr v-for="b in (batches||[]).slice(0,8)" :key="b.id">
           <td>#{{b.id}} {{b.subject}}</td>
           <td><span class="stamp" :class="{bad:b.result!=='通过'}">{{b.result}}</span></td>
+          <td>{{b.missing_fields||'—'}}</td>
           <td>{{b.detail}}</td>
         </tr></tbody></table>
       </div>
     </div>
     <div class="card" v-show="tab===2">
-      <h2>双写缓冲</h2>
-      <table><thead><tr><th>缓冲</th><th>批次</th><th>主题</th><th>原因</th></tr></thead>
-      <tbody><tr v-for="b in buffers" :key="b.id"><td>{{b.id}}</td><td>{{b.batch_id}}</td><td>{{b.subject}}</td><td>{{b.reason}}</td></tr></tbody></table>
+      <h2>缓冲队列（页序乙 · 按批次号先到先补）</h2>
+      <p class="meta">缺字段批次共 {{recon.missing && recon.missing.total}}；本队列 {{buffers.length}} 行，全部挂批次号、状态待补采。</p>
+      <table><thead><tr><th>页序</th><th>批次</th><th>缓冲</th><th>主题</th><th>缺字段</th><th>状态</th></tr></thead>
+      <tbody><tr v-for="b in buffers" :key="b.id">
+        <td>{{b.queue_no}}</td><td>#{{b.batch_id}}</td><td>{{b.id}}</td><td>{{b.subject}}</td><td>{{b.missing_fields}}</td><td>{{b.status}}</td>
+      </tr></tbody></table>
     </div>
     <div class="card" v-show="tab===3">
+      <h2>拒收详情</h2>
+      <p class="meta">拒收只收非缺字段（类型不符等）；缺字段进拒收行数：{{recon.surfaces && recon.surfaces.rejection_detail && recon.surfaces.rejection_detail.missing_rejected}}。</p>
+      <table><thead><tr><th>批次</th><th>主题</th><th>说明</th></tr></thead>
+      <tbody><tr v-for="r in rejections" :key="r.id"><td>#{{r.id}}</td><td>{{r.subject}}</td><td>{{r.detail}}</td></tr></tbody></table>
+      <p class="meta" v-if="!rejections.length">暂无拒收。</p>
+    </div>
+    <div class="card" v-show="tab===4">
       <h2>契约对账摘要</h2>
       <p>入站 {{recon.ingress_total}} · 通过 {{recon.passed}} · 缓冲 {{recon.buffered}} · 拒收 {{recon.rejected}} · 缓冲行 {{recon.buffer_rows}} · 对齐 {{recon.aligned}}</p>
+      <table><thead><tr><th>对账面</th><th>缺字段总数</th><th>缓冲</th><th>拒收</th><th>通过</th></tr></thead>
+      <tbody><tr v-for="(s,k) in (recon.surfaces||{})" :key="k">
+        <td>{{k}}</td><td>{{s.missing_total}}</td><td>{{s.missing_buffered}}</td><td>{{s.missing_rejected}}</td><td>{{s.missing_passed}}</td>
+      </tr></tbody></table>
     </div>
   </div>`
 }).mount('#app');
